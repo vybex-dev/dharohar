@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
 import { getServerSupabase } from "@/lib/supabase-server";
 
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
+// No route segment config here: with cacheComponents enabled, GET route
+// handlers are dynamic by default and run on the Node.js runtime.
 
 export async function GET() {
   try {
