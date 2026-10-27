@@ -1,8 +1,8 @@
--- Run AFTER sql/001_schema.sql. Idempotent.
+-- Run AFTER sql/001_schema.sql. Idempotent: safe to re-run.
 -- Coordinates are approximate (4 decimals). Verify them on a map before the demo.
 -- Embeddings are PLACEHOLDERS (embedding_model = 'placeholder'): keyword search
--- over tsv works, semantic search will return meaningless rankings until you
--- regenerate real vectors (see the notes after this file).
+-- over tsv works, but semantic search rankings are meaningless until real
+-- vectors are regenerated.
 
 -- Temporary helper: deterministic non-zero 768-dim vector per seed value.
 create or replace function public.tmp_fake_embedding(seed int)
@@ -67,7 +67,7 @@ on conflict (slug) do update set
   summary_en = excluded.summary_en, period = excluded.period, tags = excluded.tags,
   origin = excluded.origin, status = excluded.status;
 
--- ---------- chunks (one per seed site; delete+insert keeps it idempotent) ----------
+-- ---------- chunks: one per seed site (delete then insert keeps it idempotent) ----------
 delete from public.doc_chunks
 where site_id in (select id from public.sites where origin = 'seed');
 
@@ -95,16 +95,28 @@ delete from public.journey_stops
 where journey_id = (select id from public.journeys where slug = 'stone-and-cloth');
 
 insert into public.journey_stops (journey_id, site_id, position, note)
-select j.id, s.id, v.pos, v.note
-from public.journeys j
-join (values
-  ('rani-ki-vav-patan',       1, 'Start with the carved galleries of the stepwell.'),
-  ('patan-patola-weaving',    2, 'Same town: see double-ikat silk being woven.'),
-  ('mehrangarh-fort-jodhpur', 3, 'Cross into Marwar for the great fort.'),
-  ('bagru-block-printing',    4, 'Block-printing villages near Jaipur.'),
-  ('chand-baori-abhaneri',    5, 'End at the geometric stepwell of Abhaneri.')
-) as v(slug, pos, note) on true
-join public.sites s on s.slug = v.slug
-where j.slug = 'stone-and-cloth';
+select (select id from public.journeys where slug = 'stone-and-cloth'),
+       (select id from public.sites where slug = 'rani-ki-vav-patan'),
+       1, 'Start with the carved galleries of the stepwell.';
+
+insert into public.journey_stops (journey_id, site_id, position, note)
+select (select id from public.journeys where slug = 'stone-and-cloth'),
+       (select id from public.sites where slug = 'patan-patola-weaving'),
+       2, 'Same town: see double-ikat silk being woven.';
+
+insert into public.journey_stops (journey_id, site_id, position, note)
+select (select id from public.journeys where slug = 'stone-and-cloth'),
+       (select id from public.sites where slug = 'mehrangarh-fort-jodhpur'),
+       3, 'Head west to the great fort of Marwar.';
+
+insert into public.journey_stops (journey_id, site_id, position, note)
+select (select id from public.journeys where slug = 'stone-and-cloth'),
+       (select id from public.sites where slug = 'bagru-block-printing'),
+       4, 'Block-printing villages near Jaipur.';
+
+insert into public.journey_stops (journey_id, site_id, position, note)
+select (select id from public.journeys where slug = 'stone-and-cloth'),
+       (select id from public.sites where slug = 'chand-baori-abhaneri'),
+       5, 'End at the geometric stepwell of Abhaneri.';
 
 drop function if exists public.tmp_fake_embedding(int);
