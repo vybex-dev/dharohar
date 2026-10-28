@@ -74,6 +74,7 @@ export async function POST(req: Request) {
       language: r.language,
       confidence: r.confidence,
       usedFallback: r.usedFallback,
+      fallbackReason: r.fallbackReason,
       providers: r.providers,
       models: r.models,
       preprocess: r.preprocess,

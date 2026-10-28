@@ -38,6 +38,9 @@ function config() {
 
 const MIN_CHUNK_BUDGET_MS = 2_000;
 
+// Tesseract's own confidence is a mean per-word score and overstates quality on Indic scripts.
+const TESSERACT_CONFIDENCE_CAP = 0.5;
+
 /* =========================================================================
  * Types
  * ========================================================================= */
@@ -79,6 +82,7 @@ export type OcrRunResult = {
   pagesProcessed: number | null;
   truncated: boolean;
   usedFallback: boolean;
+  fallbackReason: string | null;
   preprocess: string;
 };
 
@@ -97,9 +101,6 @@ type Outcome =
 /* =========================================================================
  * Small helpers
  * ========================================================================= */
-
-const sleepFree = <T>(v: T) => v;
-void sleepFree;
 
 function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
@@ -345,10 +346,17 @@ function isProviderExhaustion(e: unknown): boolean {
 }
 
 function toMeta(c: ChunkResult): OcrChunkMeta {
-  const { text: _text, visualDescription: _vd, ...meta } = c;
-  void _text;
-  void _vd;
-  return meta;
+  return {
+    label: c.label,
+    pages: c.pages,
+    provider: c.provider,
+    model: c.model,
+    language: c.language,
+    chars: c.chars,
+    confidence: c.confidence,
+    cached: c.cached,
+    latencyMs: c.latencyMs,
+  };
 }
 
 export async function runOcr(input: RunOcrInput): Promise<OcrRunResult> {
@@ -413,6 +421,10 @@ export async function runOcr(input: RunOcrInput): Promise<OcrRunResult> {
     pagesProcessed !== null &&
     totalPages > pagesProcessed;
 
+  let fallbackReason: string | null = input.forceFallback
+    ? "forced by request"
+    : null;
+
   const finish = (
     chunks: ChunkResult[],
     usedFallback: boolean,
@@ -430,6 +442,7 @@ export async function runOcr(input: RunOcrInput): Promise<OcrRunResult> {
       pagesProcessed,
       truncated,
       usedFallback,
+      fallbackReason,
       preprocess,
     };
   };
@@ -461,7 +474,10 @@ export async function runOcr(input: RunOcrInput): Promise<OcrRunResult> {
           model: `tesseract.js:${cfg.tesseractLangs}`,
           language: detectScript(r.text),
           chars: r.text.length,
-          confidence: r.confidence,
+          confidence:
+            r.confidence === null
+              ? null
+              : Math.min(r.confidence, TESSERACT_CONFIDENCE_CAP),
           cached: false,
           latencyMs: Date.now() - t0,
           text: r.text,
@@ -534,8 +550,9 @@ export async function runOcr(input: RunOcrInput): Promise<OcrRunResult> {
   const exhausted = isProviderExhaustion(firstReal?.error);
 
   if (!isPdf && exhausted && cfg.tesseractEnabled) {
+    fallbackReason = errMsg(firstReal?.error).slice(0, 800);
     console.warn(
-      `[ocr] all LLM providers failed (${errMsg(firstReal?.error).slice(0, 300)}); falling back to Tesseract`,
+      `[ocr] all LLM providers failed (${fallbackReason}); falling back to Tesseract`,
     );
     return runFallback();
   }
@@ -597,6 +614,7 @@ export const ocrStage: StageHandler = async ({ db, asset }) => {
       pagesProcessed: result.pagesProcessed,
       truncated: result.truncated,
       usedFallback: result.usedFallback,
+      fallbackReason: result.fallbackReason,
       preprocess: result.preprocess,
     },
     provider,
