@@ -46,15 +46,41 @@ export const uploadedStage: StageHandler = async ({ db, asset }) => {
   }
 
   const hash = sha256Hex(bytes);
-  const gps = asset.mime_type?.startsWith("image/")
-    ? await readGps(bytes)
-    : null;
+  const isImage = asset.mime_type?.startsWith("image/") ?? false;
+  const gps = isImage ? await readGps(bytes) : null;
+
+  // Detect 360-degree equirectangular panoramas (standard 2:1 aspect ratio, e.g. 4000x2000)
+  let detectedKind: "photo" | "scan" | "pano" = asset.kind;
+  let dimensions: { width: number; height: number; ratio: number } | null = null;
+  if (isImage && asset.kind !== "scan") {
+    try {
+      const sharpMod = await import("sharp");
+      const sharpFn = sharpMod.default ?? sharpMod;
+      const meta = await sharpFn(bytes).metadata();
+      if (meta.width && meta.height) {
+        const ratio = meta.width / meta.height;
+        dimensions = {
+          width: meta.width,
+          height: meta.height,
+          ratio: Math.round(ratio * 100) / 100,
+        };
+        // Equirectangular projection is strictly 2:1 (360° x 180°). Allow small ±4% margin of error
+        if (Math.abs(ratio - 2.0) <= 0.08 && meta.width >= 800) {
+          detectedKind = "pano";
+        }
+      }
+    } catch (err) {
+      // Image metadata failure should not abort upload stage
+      console.warn("[uploadedStage] Image dimension check skipped:", err);
+    }
+  }
 
   const { error: updErr } = await db
     .from("assets")
     .update({
       content_hash: hash,
       size_bytes: bytes.byteLength,
+      kind: detectedKind,
       exif_location: gps ? pointEwkt(gps.lat, gps.lng) : null,
     })
     .eq("id", asset.id);
@@ -62,7 +88,13 @@ export const uploadedStage: StageHandler = async ({ db, asset }) => {
     throw new Error(`Could not save asset metadata: ${updErr.message}`);
 
   return {
-    output: { contentHash: hash, sizeBytes: bytes.byteLength, exif: gps },
+    output: {
+      contentHash: hash,
+      sizeBytes: bytes.byteLength,
+      exif: gps,
+      dimensions,
+      kind: detectedKind,
+    },
     provider: "internal",
   };
 };

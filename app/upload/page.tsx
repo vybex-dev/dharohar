@@ -92,7 +92,8 @@ export default function UploadPage() {
   const [file, setFile] = useState<File | null>(null);
   const [title, setTitle] = useState("");
   const [notes, setNotes] = useState("");
-  const [kind, setKind] = useState<"photo" | "scan">("photo");
+  const [kind, setKind] = useState<"photo" | "scan" | "pano">("photo");
+  const [detectedPano, setDetectedPano] = useState(false);
   const [phase, setPhase] = useState<Phase>("idle");
   const [job, setJob] = useState<JobView | null>(null);
   const [log, setLog] = useState<StageLogEntry[]>([]);
@@ -135,8 +136,30 @@ export default function UploadPage() {
     e.target.value = ""; // allow picking the same file again
     if (!f) return;
     setFile(f);
-    setKind(f.type === "application/pdf" ? "scan" : "photo");
     setError(null);
+    setDetectedPano(false);
+    if (f.type === "application/pdf") {
+      setKind("scan");
+    } else {
+      setKind("photo");
+      if (f.type.startsWith("image/")) {
+        const img = new Image();
+        const objUrl = URL.createObjectURL(f);
+        img.onload = () => {
+          URL.revokeObjectURL(objUrl);
+          if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+            const ratio = img.naturalWidth / img.naturalHeight;
+            // 2:1 aspect ratio check for equirectangular projection
+            if (Math.abs(ratio - 2.0) <= 0.08 && img.naturalWidth >= 800) {
+              setKind("pano");
+              setDetectedPano(true);
+            }
+          }
+        };
+        img.onerror = () => URL.revokeObjectURL(objUrl);
+        img.src = objUrl;
+      }
+    }
   }
 
   async function pump(jobId: string) {
@@ -354,12 +377,21 @@ export default function UploadPage() {
           <select
             value={kind}
             disabled={busy || file?.type === "application/pdf"}
-            onChange={(e) => setKind(e.target.value as "photo" | "scan")}
+            onChange={(e) => setKind(e.target.value as "photo" | "scan" | "pano")}
             className="mt-1 w-full rounded-lg border border-gray-400 bg-white px-3 py-3 text-base text-black"
           >
             <option value="photo">Photo of a site or object</option>
+            <option value="pano">360° Panorama (equirectangular)</option>
             <option value="scan">Scanned document</option>
           </select>
+          {detectedPano && (
+            <div className="mt-2 flex items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-900">
+              <span className="text-base">✨</span>
+              <span>
+                Detected <strong>360° equirectangular panorama</strong> (2:1 aspect ratio). Marked as kind=pano.
+              </span>
+            </div>
+          )}
         </label>
 
         <label className="block">

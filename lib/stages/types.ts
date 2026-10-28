@@ -18,7 +18,7 @@ export type JobRow = {
 export type AssetRow = {
   id: string;
   site_id: string | null;
-  kind: "photo" | "scan";
+  kind: "photo" | "scan" | "pano";
   storage_bucket: string;
   storage_path: string;
   original_filename: string | null;

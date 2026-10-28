@@ -4,6 +4,7 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Map as MapLibreMap, Marker, Popup } from "maplibre-gl";
+import type { JourneyDto } from "@/app/api/journeys/route";
 import SearchPanel, {
   type FacetOption,
   type ResultRow,
@@ -45,7 +46,9 @@ function buildPopupContent(
   if (site.thumbnail_url) {
     const img = document.createElement("img");
     img.src = site.thumbnail_url;
-    img.alt = site.name_en;
+    img.alt = site.summary_en
+      ? `${site.name_en} - ${site.summary_en.slice(0, 100)}`
+      : `${site.name_en} photo`;
     img.loading = "lazy";
     img.style.cssText =
       "width:100%;height:120px;object-fit:cover;border-radius:6px;margin-bottom:6px";
@@ -186,6 +189,9 @@ export default function HomePage() {
   const [mapReady, setMapReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sites, setSites] = useState<SiteDto[]>([]);
+  const [journeys, setJourneys] = useState<JourneyDto[]>([]);
+  const [selectedJourneyId, setSelectedJourneyId] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<"sites" | "journeys">("sites");
 
   const [query, setQuery] = useState("");
   const [submitted, setSubmitted] = useState("");
@@ -224,7 +230,12 @@ export default function HomePage() {
         mapRef.current = map;
         map.addControl(new lib.NavigationControl(), "top-right");
 
-        const res = await fetch("/api/sites");
+        // Fetch sites and journeys in parallel
+        const [res, jRes] = await Promise.all([
+          fetch("/api/sites"),
+          fetch("/api/journeys").catch(() => null),
+        ]);
+
         const data = (await res.json()) as SitesResponse;
         if (disposed) return;
         if (!res.ok || !data.ok || !data.sites) {
@@ -233,6 +244,20 @@ export default function HomePage() {
           );
         }
 
+        let loadedJourneys: JourneyDto[] = [];
+        if (jRes && jRes.ok) {
+          try {
+            const jData = await jRes.json();
+            if (jData.ok && Array.isArray(jData.journeys)) {
+              loadedJourneys = jData.journeys;
+              setJourneys(loadedJourneys);
+            }
+          } catch {
+            // non-fatal
+          }
+        }
+
+        // Add site pins
         for (const site of data.sites) {
           const pin = buildPin(site, {
             select: (id) => selectSite(id, "map"),
@@ -245,13 +270,96 @@ export default function HomePage() {
         }
         setSites(data.sites);
 
-        // Deep links: /?site=<id> (from the upload page) and /?q=<text>.
+        // Add journeys route layers once map style is loaded
+        const addJourneyLayers = () => {
+          if (disposed || !map.isStyleLoaded()) return;
+
+          const features: GeoJSON.Feature[] = loadedJourneys.map((j) => ({
+            type: "Feature",
+            properties: {
+              id: j.id,
+              slug: j.slug,
+              title: j.title,
+              color: j.color || "#b45309",
+            },
+            geometry: j.routeGeojson,
+          }));
+
+          if (!map.getSource("journeys-routes")) {
+            map.addSource("journeys-routes", {
+              type: "geojson",
+              data: {
+                type: "FeatureCollection",
+                features,
+              },
+            });
+
+            // Translucent glowing casing
+            map.addLayer({
+              id: "journeys-casing",
+              type: "line",
+              source: "journeys-routes",
+              paint: {
+                "line-color": ["get", "color"],
+                "line-width": 8,
+                "line-opacity": 0.35,
+              },
+            });
+
+            // Solid route line
+            map.addLayer({
+              id: "journeys-line",
+              type: "line",
+              source: "journeys-routes",
+              paint: {
+                "line-color": ["get", "color"],
+                "line-width": 4,
+                "line-opacity": 0.95,
+              },
+            });
+
+            map.on("click", "journeys-line", (e) => {
+              const f = e.features?.[0];
+              if (f?.properties?.id) {
+                setSelectedJourneyId(f.properties.id);
+                setViewMode("journeys");
+              }
+            });
+
+            map.on("mouseenter", "journeys-line", () => {
+              map.getCanvas().style.cursor = "pointer";
+            });
+            map.on("mouseleave", "journeys-line", () => {
+              map.getCanvas().style.cursor = "";
+            });
+          }
+        };
+
+        if (map.isStyleLoaded()) {
+          addJourneyLayers();
+        } else {
+          map.once("load", addJourneyLayers);
+        }
+
+        // Deep links: /?site=<id>, /?q=<text>, /?journey=<slug>
         const sp = new URLSearchParams(window.location.search);
         const q = sp.get("q")?.slice(0, 500) ?? "";
         if (q) {
           setQuery(q);
           setSubmitted(q.trim());
         }
+
+        const wantedJourney = sp.get("journey");
+        if (wantedJourney && loadedJourneys.length > 0) {
+          const targetJ = loadedJourneys.find(
+            (j) => j.slug === wantedJourney || j.id === wantedJourney,
+          );
+          if (targetJ) {
+            setViewMode("journeys");
+            setSelectedJourneyId(targetJ.id);
+          }
+        }
+
         const wanted = sp.get("site");
         const target = wanted
           ? data.sites.find((s) => s.id === wanted)
@@ -498,11 +606,36 @@ export default function HomePage() {
     map.fitBounds(bounds, {
       padding: wide
         ? { top: 70, right: 70, bottom: 70, left: 420 }
-        : { top: 70, right: 50, bottom: Math.round(window.innerHeight * 0.52) + 30, left: 50 },
+        : { top: 70, right: 40, bottom: 220, left: 40 },
       maxZoom: 12,
       duration: 600,
     });
   }, [mapReady, pinKey, siteById]);
+
+  // Fit bounds when a journey is selected
+  useEffect(() => {
+    const map = mapRef.current;
+    const lib = libRef.current;
+    if (!mapReady || !map || !lib || !selectedJourneyId) return;
+
+    const j = journeys.find((x) => x.id === selectedJourneyId);
+    if (!j?.routeGeojson?.coordinates?.length) return;
+
+    const bounds = new lib.LngLatBounds();
+    for (const [lng, lat] of j.routeGeojson.coordinates) {
+      bounds.extend([lng, lat]);
+    }
+    if (bounds.isEmpty()) return;
+
+    const wide = window.innerWidth >= 768;
+    map.fitBounds(bounds, {
+      padding: wide
+        ? { top: 80, right: 80, bottom: 80, left: 440 }
+        : { top: 70, right: 40, bottom: 240, left: 40 },
+      maxZoom: 12,
+      duration: 700,
+    });
+  }, [selectedJourneyId, journeys, mapReady]);
 
   // One popup, owned by the selection.
   useEffect(() => {
@@ -597,6 +730,12 @@ export default function HomePage() {
         selectedId={selectedId}
         onSelect={(id) => selectSite(id, "list")}
         onHover={setHoverId}
+        journeys={journeys}
+        selectedJourneyId={selectedJourneyId}
+        onSelectJourney={setSelectedJourneyId}
+        viewMode={viewMode}
+        onViewModeChange={setViewMode}
+        onSelectSiteStop={(siteId) => selectSite(siteId, "list")}
       />
 
       {status === "error" && (

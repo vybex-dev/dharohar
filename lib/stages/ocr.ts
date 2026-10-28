@@ -48,7 +48,7 @@ const TESSERACT_CONFIDENCE_CAP = 0.5;
 export type RunOcrInput = {
   bytes: Uint8Array;
   mimeType: string;
-  kind?: "photo" | "scan";
+  kind?: "photo" | "scan" | "pano";
   skipCache?: boolean;
   /** Skip the LLM chain and go straight to Tesseract (images only). For testing. */
   forceFallback?: boolean;

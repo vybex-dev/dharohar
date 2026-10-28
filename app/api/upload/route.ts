@@ -11,7 +11,7 @@ const BodySchema = z.object({
   filename: z.string().trim().min(1).max(200),
   mimeType: z.enum(ALLOWED_MIME_TYPES),
   sizeBytes: z.number().int().positive().max(MAX_UPLOAD_BYTES),
-  kind: z.enum(["photo", "scan"]).optional(),
+  kind: z.enum(["photo", "scan", "pano"]).optional(),
   title: z.string().trim().max(200).optional(),
   notes: z.string().trim().max(2000).optional(),
 });

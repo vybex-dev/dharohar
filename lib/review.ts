@@ -78,7 +78,7 @@ const SITE_COLUMNS =
 
 type AssetRow = {
   id: string;
-  kind: "photo" | "scan";
+  kind: "photo" | "scan" | "pano";
   storage_bucket: string;
   storage_path: string;
   mime_type: string | null;

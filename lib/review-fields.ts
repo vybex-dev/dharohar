@@ -110,7 +110,7 @@ export type JobState = {
 
 export type AssetView = {
   id: string;
-  kind: "photo" | "scan";
+  kind: "photo" | "scan" | "pano";
   mimeType: string | null;
   filename: string | null;
   /** Short-lived signed URL (the bucket is private). Null if signing failed or the job is not ready. */

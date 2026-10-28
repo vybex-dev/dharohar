@@ -37,9 +37,25 @@ export type SiteInfo = {
 
 export type GalleryImage = { id: string; url: string; caption: string | null };
 
+export type PanoramaHotspot = {
+  id: string;
+  pitch: number;
+  yaw: number;
+  title: string;
+  text: string;
+  category?: "architecture" | "folklore" | "inscription" | "history" | "general";
+};
+
+export type PanoramaItem = {
+  id: string;
+  url: string;
+  caption: string | null;
+  hotspots: PanoramaHotspot[];
+};
+
 export type SourceDoc = {
   id: string;
-  kind: "photo" | "scan";
+  kind: "photo" | "scan" | "pano";
   fileUrl: string | null;
   isImage: boolean;
   isPdf: boolean;
@@ -65,6 +81,7 @@ export type RelatedSite = {
 export type SiteDetail = {
   site: SiteInfo;
   photos: GalleryImage[];
+  panos: PanoramaItem[];
   documents: SourceDoc[];
   related: RelatedSite[];
 };
@@ -72,11 +89,13 @@ export type SiteDetail = {
 type AssetRow = {
   id: string;
   site_id: string | null;
-  kind: "photo" | "scan";
+  kind: "photo" | "scan" | "pano";
   storage_bucket: string;
   storage_path: string;
   mime_type: string | null;
   caption: string | null;
+  notes?: string | null;
+  extracted?: Record<string, unknown> | null;
   language_detected: string | null;
   ocr_text: string | null;
   text_en: string | null;
@@ -148,7 +167,7 @@ export async function getSiteDetail(
     db
       .from("assets")
       .select(
-        "id, site_id, kind, storage_bucket, storage_path, mime_type, caption, language_detected, ocr_text, text_en, ocr_confidence",
+        "id, site_id, kind, storage_bucket, storage_path, mime_type, caption, notes, extracted, language_detected, ocr_text, text_en, ocr_confidence",
       )
       .eq("site_id", row.id)
       .order("created_at", { ascending: true }),
@@ -193,12 +212,70 @@ export async function getSiteDetail(
     urls.get(`${a.storage_bucket}/${a.storage_path}`) ?? null;
 
   const photos: GalleryImage[] = [];
+  const panos: PanoramaItem[] = [];
   const documents: SourceDoc[] = [];
   for (const a of assets) {
     const isImage = a.mime_type?.startsWith("image/") ?? false;
     const url = urlOf(a);
     if (a.kind === "photo" && isImage && url) {
       photos.push({ id: a.id, url, caption: a.caption });
+    }
+    if (a.kind === "pano" && isImage && url) {
+      // Hotspots linking directly to cultural and architectural notes
+      const customHotspots: PanoramaHotspot[] = Array.isArray(a.extracted?.hotspots)
+        ? (a.extracted.hotspots as PanoramaHotspot[])
+        : [];
+
+      const derivedHotspots: PanoramaHotspot[] = [];
+      if (customHotspots.length === 0) {
+        if (row.summary_en) {
+          derivedHotspots.push({
+            id: `spot-arch-${a.id}`,
+            pitch: 0,
+            yaw: -15,
+            title: "Architectural Form",
+            text: row.summary_en.slice(0, 280),
+            category: "architecture",
+          });
+        }
+        if (row.folklore_notes) {
+          derivedHotspots.push({
+            id: `spot-folk-${a.id}`,
+            pitch: 6,
+            yaw: 70,
+            title: "Folklore & Sacred Memory",
+            text: row.folklore_notes,
+            category: "folklore",
+          });
+        }
+        if (row.period || (row.crafts && row.crafts.length > 0)) {
+          derivedHotspots.push({
+            id: `spot-hist-${a.id}`,
+            pitch: -10,
+            yaw: 160,
+            title: "Period & Artisanal Context",
+            text: `Era: ${row.period || "Heritage period"}. Known crafts: ${(row.crafts || []).join(", ") || "Indigenous masonry"}.`,
+            category: "history",
+          });
+        }
+        if (a.notes) {
+          derivedHotspots.push({
+            id: `spot-field-${a.id}`,
+            pitch: 10,
+            yaw: -110,
+            title: "Archivist Field Notes",
+            text: a.notes,
+            category: "general",
+          });
+        }
+      }
+
+      panos.push({
+        id: a.id,
+        url,
+        caption: a.caption,
+        hotspots: customHotspots.length > 0 ? customHotspots : derivedHotspots,
+      });
     }
     const hasText = !!(a.ocr_text?.trim() || a.text_en?.trim());
     if (a.kind === "scan" || hasText) {
@@ -231,6 +308,7 @@ export async function getSiteDetail(
       lng: geo?.lng ?? null,
     },
     photos,
+    panos,
     documents,
     related: related.map((r) => ({
       id: r.site_id,

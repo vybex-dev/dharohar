@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Suspense } from "react";
+import PanoramaViewer from "@/components/PanoramaViewer";
 import SiteGallery from "@/components/SiteGallery";
 import SiteMapSnippet from "@/components/SiteMapSnippet";
 import { categoryLabel } from "@/lib/facets";
@@ -29,7 +30,7 @@ async function SiteContent({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const detail = await getSiteDetail(decodeURIComponent(id));
   if (!detail) notFound();
-  const { site, photos, documents, related } = detail;
+  const { site, photos, panos, documents, related } = detail;
 
   return (
     <article>
@@ -37,7 +38,7 @@ async function SiteContent({ params }: { params: Promise<{ id: string }> }) {
       <nav aria-label="Breadcrumb" className="mb-4 text-sm">
         <Link
           href={`/?site=${site.id}`}
-          className="font-medium text-amber-800 underline-offset-2 hover:underline"
+          className="font-medium text-amber-800 underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-amber-700"
         >
           ← Back to the map
         </Link>
@@ -47,11 +48,19 @@ async function SiteContent({ params }: { params: Promise<{ id: string }> }) {
 
       <div className="mt-6 grid gap-8 lg:grid-cols-[minmax(0,1fr)_360px]">
         <div className="min-w-0 space-y-10">
-          {photos.length > 0 ? (
-            <SiteGallery images={photos} name={site.name_en} />
-          ) : (
-            <NoPhotos />
+          {panos.length > 0 && (
+            <PanoramaViewer panorama={panos[0]} siteName={site.name_en} />
           )}
+
+          {photos.length > 0 ? (
+            <SiteGallery
+              images={photos}
+              name={site.name_en}
+              summary={site.summary_en}
+            />
+          ) : panos.length === 0 ? (
+            <NoPhotos />
+          ) : null}
 
           {site.summary_en && (
             <Section title="About this record">
@@ -441,27 +450,27 @@ function Related({ related }: { related: RelatedSite[] }) {
                   // eslint-disable-next-line @next/next/no-img-element -- signed storage URLs, unknown host
                   <img
                     src={r.thumbnail}
-                    alt=""
+                    alt={`${r.name} thumbnail photo`}
                     loading="lazy"
                     className="h-full w-full object-cover"
                   />
                 ) : (
-                  <div className="flex h-full items-center justify-center text-[10px] text-stone-400">
+                  <div className="flex h-full items-center justify-center text-[10px] text-stone-500">
                     No photo
                   </div>
                 )}
               </div>
               <div className="min-w-0">
-                <div className="truncate font-semibold group-hover:text-amber-900">
+                <div className="truncate font-semibold text-stone-900 group-hover:text-amber-900">
                   {r.name}
                 </div>
-                <div className="truncate text-xs text-stone-500">
+                <div className="truncate text-xs text-stone-600">
                   {[categoryLabel(r.type), r.district, r.state]
                     .filter(Boolean)
                     .join(" · ")}
                 </div>
                 {r.era && (
-                  <div className="truncate text-xs text-stone-500">{r.era}</div>
+                  <div className="truncate text-xs text-stone-600">{r.era}</div>
                 )}
                 {r.basis === "embedding" && (
                   <span
@@ -484,19 +493,26 @@ function Related({ related }: { related: RelatedSite[] }) {
 
 function PageSkeleton() {
   return (
-    <div role="status" aria-label="Loading site" className="animate-pulse">
-      <div className="mb-4 h-4 w-32 rounded bg-stone-200" />
-      <div className="h-5 w-40 rounded bg-stone-200" />
-      <div className="mt-3 h-9 w-2/3 rounded bg-stone-200" />
+    <div role="status" aria-label="Loading site details" className="animate-pulse space-y-6">
+      <div className="h-4 w-32 rounded bg-stone-200" />
+      <div className="flex items-center gap-2">
+        <div className="h-6 w-24 rounded-full bg-stone-200" />
+        <div className="h-6 w-32 rounded-full bg-stone-200" />
+      </div>
+      <div className="h-10 w-2/3 rounded-lg bg-stone-200" />
       <div className="mt-6 grid gap-8 lg:grid-cols-[minmax(0,1fr)_360px]">
         <div className="space-y-6">
-          <div className="aspect-[4/3] rounded-xl bg-stone-200" />
-          <div className="h-4 w-full rounded bg-stone-200" />
-          <div className="h-4 w-5/6 rounded bg-stone-200" />
+          <div className="aspect-[4/3] w-full rounded-xl bg-stone-200 shadow-sm" />
+          <div className="space-y-2 rounded-xl bg-white p-6 shadow-sm ring-1 ring-stone-200">
+            <div className="h-6 w-40 rounded bg-stone-200" />
+            <div className="h-4 w-full rounded bg-stone-200" />
+            <div className="h-4 w-5/6 rounded bg-stone-200" />
+            <div className="h-4 w-4/6 rounded bg-stone-200" />
+          </div>
         </div>
         <div className="space-y-6">
-          <div className="h-56 rounded-xl bg-stone-200" />
-          <div className="h-64 rounded-xl bg-stone-200" />
+          <div className="h-60 rounded-xl bg-stone-200 shadow-sm" />
+          <div className="h-72 rounded-xl bg-stone-200 shadow-sm" />
         </div>
       </div>
     </div>
