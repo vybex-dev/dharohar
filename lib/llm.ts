@@ -42,6 +42,7 @@ export type EmbedInput = { texts: string[]; purpose: "document" | "query" };
 export type CallOptions = {
   /** Ignore cached results; the fresh result overwrites the cache entry. */
   skipCache?: boolean;
+  budgetMs?: number;
 };
 
 export type LLMResult<T> = {
@@ -354,14 +355,20 @@ type BuiltRequest = { system: string; user: string; image?: ImageInput };
 function buildOcr(input: OcrInput): BuiltRequest {
   return {
     system: [
-      "You are an OCR engine for scanned and photographed heritage material: inscriptions, archival records, signboards, letters and printed pages.",
-      "The text may be in Devanagari (Hindi, Marathi, Sanskrit), Gujarati or English, often mixed, and may be faded or handwritten.",
-      "Transcribe exactly what is written, keeping line breaks and the original script. Do not translate, summarise or correct spelling.",
-      "Mark unreadable parts as [illegible]. If the image contains no text, return an empty string for text.",
+      "You are an OCR engine for scanned and photographed Indian heritage material: inscriptions, archival records, signboards, plaques, letters, registers and printed pages.",
+      "The text may be in Devanagari (Hindi, Marathi, Sanskrit), Gujarati or English, often mixed on one page, and may be faded, stained, rotated or handwritten.",
+      "",
+      "RULES",
+      "1. Transcribe exactly what is written, in the original script. Never translate, transliterate, summarise or correct spelling. Keep Devanagari and Gujarati digits as written.",
+      "2. Preserve line breaks as they appear. For multi-column pages, read each column top to bottom, left column first, and separate columns with a blank line.",
+      "3. Mark any word or stretch you cannot read with [illegible]. Do not guess missing letters or complete damaged words.",
+      "4. Include text on signboards, stamps, seals, plaques, margins and handwriting. Skip purely decorative marks.",
+      "5. Never invent text. If the image contains no readable text, return an empty string for text.",
+      "",
       "Reply with a single JSON object and nothing else, with these keys:",
-      '"language": dominant language as an ISO 639-1 code such as "hi", "gu", "en", or "mixed";',
+      '"language": the dominant language as an ISO 639-1 code such as "hi", "gu", "en", "mr", "sa", or "mixed";',
       '"text": the transcription;',
-      '"confidence": a number from 0 to 1 for how reliable the transcription is;',
+      '"confidence": your own estimate from 0 to 1 of how reliable the transcription is (about 0.9 or more for clean print, around 0.5 if a lot is illegible or handwritten, below 0.3 if you are mostly guessing; use 1 when there is no text);',
       '"visual_description": one or two English sentences describing what the image shows (type of building, object or document).',
     ].join("\n"),
     user: input.hint
@@ -840,18 +847,16 @@ async function cacheSet(
   overwrite: boolean,
 ): Promise<void> {
   try {
-    const { error } = await getServerSupabase()
-      .from("llm_cache")
-      .upsert(
-        {
-          key: cand.key,
-          task,
-          provider: cand.provider,
-          model: cand.model,
-          output,
-        },
-        { onConflict: "key", ignoreDuplicates: !overwrite },
-      );
+    const { error } = await getServerSupabase().from("llm_cache").upsert(
+      {
+        key: cand.key,
+        task,
+        provider: cand.provider,
+        model: cand.model,
+        output,
+      },
+      { onConflict: "key", ignoreDuplicates: !overwrite },
+    );
     if (error) warn({ where: "cache_set", message: error.message });
   } catch (e) {
     warn({
@@ -970,7 +975,8 @@ async function runStructured<S extends z.ZodType>(
   }
 
   const deadline =
-    started + envInt("LLM_TOTAL_BUDGET_MS", DEFAULT_TOTAL_BUDGET_MS);
+    started +
+    (opts.budgetMs ?? envInt("LLM_TOTAL_BUDGET_MS", DEFAULT_TOTAL_BUDGET_MS));
   const attempts: AttemptLog[] = [];
 
   for (const cand of orderByCooldown(cands)) {

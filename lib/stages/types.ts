@@ -29,6 +29,7 @@ export type AssetRow = {
   content_hash: string | null;
   language_detected: string | null;
   ocr_text: string | null;
+  ocr_confidence: number | null;
   text_en: string | null;
 };
 

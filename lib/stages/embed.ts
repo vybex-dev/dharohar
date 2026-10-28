@@ -8,8 +8,12 @@ export const embedStage: StageHandler = async ({ db, job, asset }) => {
       "No site linked to this job. The extract stage must run first.",
     );
 
-  const text = asset.text_en?.trim() || asset.title?.trim();
-  if (!text) throw new Error("No English text available to embed");
+  // Temporary fallback chain until the real extract stage supplies translated text_en.
+  const text =
+    asset.text_en?.trim() ||
+    asset.ocr_text?.trim() ||
+    asset.title?.trim() ||
+    `Upload ${asset.id.slice(0, 8)}`;
 
   const embedding = fakeEmbedding(asset.content_hash ?? sha256Hex(asset.id));
 
@@ -22,6 +26,7 @@ export const embedStage: StageHandler = async ({ db, job, asset }) => {
       text_en: text,
       text_original: asset.ocr_text,
       language: asset.language_detected,
+      ocr_confidence: asset.ocr_confidence,
       content_hash: sha256Hex(text),
       embedding: JSON.stringify(embedding), // pgvector accepts '[0.1,0.2,...]'
       embedding_model: "stub",

@@ -12,6 +12,17 @@ const nextConfig: NextConfig = {
       },
     },
   },
+
+  // Keep native/WASM-heavy packages out of the bundle and load them from node_modules.
+  serverExternalPackages: ["sharp", "tesseract.js"],
+
+  // Make sure Tesseract's worker and WASM core files are shipped with the advance route on Vercel.
+  outputFileTracingIncludes: {
+    "/api/jobs/[id]/advance": [
+      "./node_modules/tesseract.js/**/*",
+      "./node_modules/tesseract.js-core/**/*",
+    ],
+  },
 };
 
 export default nextConfig;

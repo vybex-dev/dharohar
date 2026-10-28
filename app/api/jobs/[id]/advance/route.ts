@@ -6,18 +6,17 @@ import { STAGE_HANDLERS } from "@/lib/stages";
 import type { AssetRow, JobRow } from "@/lib/stages/types";
 import { getServerSupabase } from "@/lib/supabase-server";
 
-// Stub stages finish in a couple of seconds. 30 is below the old Hobby cap (60s).
-// VERIFY the current Hobby limit in Vercel's docs before real AI stages raise this.
-// If Next rejects this line under cacheComponents, delete it and set maxDuration
-// in vercel.json instead.
-export const maxDuration = 30;
+// OCR can use OCR_STAGE_BUDGET_MS (default 20 s) plus a possible Tesseract fallback
+// (OCR_TESSERACT_TIMEOUT_MS, default 20 s). VERIFY the maximum duration your Vercel
+// plan allows. If it is lower than 60, lower this value AND those two env vars.
+export const maxDuration = 60;
 
 const ParamsSchema = z.object({ id: z.string().uuid() });
 
 const JOB_COLUMNS =
   "id, asset_id, site_id, stage, status, attempts, max_attempts, locked_at, error, created_at, updated_at";
 const ASSET_COLUMNS =
-  "id, site_id, kind, storage_bucket, storage_path, original_filename, mime_type, size_bytes, title, notes, content_hash, language_detected, ocr_text, text_en";
+  "id, site_id, kind, storage_bucket, storage_path, original_filename, mime_type, size_bytes, title, notes, content_hash, language_detected, ocr_text, ocr_confidence, text_en";
 
 function jobView(j: JobRow) {
   return {
@@ -128,7 +127,7 @@ export async function POST(
         asset: assetData as AssetRow,
       });
 
-      // 4. Record output and move to the next stage (no-op if it already moved)
+      // 4. Record output (including provider and model) and move to the next stage
       const { data: doneRows, error: doneErr } = await db.rpc(
         "complete_job_stage",
         {
