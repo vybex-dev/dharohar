@@ -44,10 +44,25 @@ type UploadApiResponse =
 type AdvanceApiResponse = {
   ok: boolean;
   claimed?: boolean;
+  ran?: Stage | null;
+  provider?: string | null;
+  model?: string | null;
+  output?: {
+    published?: boolean;
+    publishBlockedReason?: string | null;
+  } & Record<string, unknown>;
   stageError?: string;
   job?: JobView;
   error?: string;
 };
+
+type RetryApiResponse = { ok: boolean; job?: JobView; error?: string };
+
+type StageLogEntry =
+  | { stage: Stage; ok: true; provider: string | null; model: string | null }
+  | { stage: Stage; ok: false; error: string };
+
+type PublishInfo = { published: boolean; reason: string | null };
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -80,8 +95,11 @@ export default function UploadPage() {
   const [kind, setKind] = useState<"photo" | "scan">("photo");
   const [phase, setPhase] = useState<Phase>("idle");
   const [job, setJob] = useState<JobView | null>(null);
+  const [log, setLog] = useState<StageLogEntry[]>([]);
+  const [publishInfo, setPublishInfo] = useState<PublishInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
+  const [retrying, setRetrying] = useState(false);
 
   const cameraRef = useRef<HTMLInputElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -107,7 +125,10 @@ export default function UploadPage() {
   );
 
   const busy =
-    phase === "requesting" || phase === "uploading" || phase === "processing";
+    phase === "requesting" ||
+    phase === "uploading" ||
+    phase === "processing" ||
+    retrying;
 
   function onPick(e: ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0] ?? null;
@@ -130,8 +151,29 @@ export default function UploadPage() {
       setJob(data.job);
       setWarning(data.stageError ?? null);
 
+      if (data.ran) {
+        setLog((prev) => [
+          ...prev,
+          data.stageError
+            ? { stage: data.ran as Stage, ok: false, error: data.stageError }
+            : {
+                stage: data.ran as Stage,
+                ok: true,
+                provider: data.provider ?? null,
+                model: data.model ?? null,
+              },
+        ]);
+      }
+
       const j = data.job;
       if (j.stage === "published" && j.status === "done") {
+        setPublishInfo({
+          // Always present once the "published" stage data comes from the
+          // success path or the resumed-poll branch; the default only
+          // covers an edge case where site_id was somehow never set.
+          published: data.output?.published ?? true,
+          reason: data.output?.publishBlockedReason ?? null,
+        });
         setPhase("done");
         return;
       }
@@ -158,6 +200,8 @@ export default function UploadPage() {
     setError(null);
     setWarning(null);
     setJob(null);
+    setLog([]);
+    setPublishInfo(null);
     setPhase("requesting");
 
     try {
@@ -195,12 +239,36 @@ export default function UploadPage() {
     }
   }
 
+  async function onRetry() {
+    if (!job) return;
+    setRetrying(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/jobs/${job.id}/retry`, { method: "POST" });
+      const data = (await res.json()) as RetryApiResponse;
+      if (!res.ok || !data.ok || !data.job)
+        throw new Error(data.error ?? `Retry failed (HTTP ${res.status})`);
+      setJob(data.job);
+      setWarning(null);
+      setPhase("processing");
+      setRetrying(false);
+      await pump(job.id);
+    } catch (err) {
+      if (!activeRef.current) return;
+      setRetrying(false);
+      setError(err instanceof Error ? err.message : "Retry failed");
+      setPhase("error");
+    }
+  }
+
   function reset() {
     setFile(null);
     setTitle("");
     setNotes("");
     setKind("photo");
     setJob(null);
+    setLog([]);
+    setPublishInfo(null);
     setError(null);
     setWarning(null);
     setPhase("idle");
@@ -245,7 +313,6 @@ export default function UploadPage() {
           </button>
         </div>
 
-        {/* capture="environment" opens the rear camera on phones; desktops ignore it */}
         <input
           ref={cameraRef}
           type="file"
@@ -344,22 +411,43 @@ export default function UploadPage() {
             />
           </div>
 
-          <ol className="space-y-1 text-sm">
+          {job && (
+            <p className="text-xs text-gray-500">
+              Attempt {job.attempts}/{job.max_attempts} on this stage
+            </p>
+          )}
+
+          <ol className="space-y-1.5 text-sm">
             {STAGES.map((s, i) => {
               const done = phase === "done" || i < currentIdx;
               const active = phase === "processing" && i === currentIdx;
+              const lastForStage = [...log]
+                .reverse()
+                .find((l) => l.stage === s);
               return (
-                <li
-                  key={s}
-                  className={
-                    done
-                      ? "text-green-700"
-                      : active
-                        ? "font-medium"
-                        : "text-gray-500"
-                  }
-                >
-                  {done ? "✓" : active ? "…" : "○"} {STAGE_LABELS[s]}
+                <li key={s}>
+                  <div
+                    className={
+                      done
+                        ? "text-green-700"
+                        : active
+                          ? "font-medium"
+                          : "text-gray-500"
+                    }
+                  >
+                    {done ? "✓" : active ? "…" : "○"} {STAGE_LABELS[s]}
+                    {done && lastForStage?.ok && lastForStage.provider && (
+                      <span className="ml-2 text-xs font-normal text-gray-500">
+                        {lastForStage.provider}
+                        {lastForStage.model ? `/${lastForStage.model}` : ""}
+                      </span>
+                    )}
+                  </div>
+                  {lastForStage && !lastForStage.ok && (
+                    <div className="ml-5 text-xs text-amber-700">
+                      {lastForStage.error}
+                    </div>
+                  )}
                 </li>
               );
             })}
@@ -372,17 +460,35 @@ export default function UploadPage() {
           )}
 
           {phase === "done" && (
-            <div className="space-y-2 rounded-lg bg-green-100 p-3 text-green-900">
-              <p className="font-medium">
-                Published. Your record is on the map.
-              </p>
+            <div
+              className={`space-y-2 rounded-lg p-3 ${
+                publishInfo?.published === false
+                  ? "bg-amber-100 text-amber-900"
+                  : "bg-green-100 text-green-900"
+              }`}
+            >
+              {publishInfo?.published === false ? (
+                <>
+                  <p className="font-medium">Saved, but not on the map yet.</p>
+                  <p className="text-sm">
+                    {publishInfo.reason ??
+                      "It needs a location before it can be published."}
+                  </p>
+                </>
+              ) : (
+                <p className="font-medium">
+                  Published. Your record is on the map.
+                </p>
+              )}
               <div className="flex gap-4 text-sm">
-                <Link
-                  href={job?.site_id ? `/?site=${job.site_id}` : "/"}
-                  className="font-medium underline"
-                >
-                  View on map
-                </Link>
+                {publishInfo?.published !== false && (
+                  <Link
+                    href={job?.site_id ? `/?site=${job.site_id}` : "/"}
+                    className="font-medium underline"
+                  >
+                    View on map
+                  </Link>
+                )}
                 <button type="button" onClick={reset} className="underline">
                   Upload another
                 </button>
@@ -398,11 +504,23 @@ export default function UploadPage() {
           className="mt-4 rounded-lg bg-red-100 p-3 text-sm text-red-900"
         >
           {error}
-          {phase === "error" && (
-            <button type="button" onClick={reset} className="ml-3 underline">
-              Start over
-            </button>
-          )}
+          <div className="mt-2 flex gap-4">
+            {phase === "error" && job?.status === "failed" && (
+              <button
+                type="button"
+                disabled={retrying}
+                onClick={onRetry}
+                className="underline disabled:opacity-50"
+              >
+                {retrying ? "Retrying…" : "Retry"}
+              </button>
+            )}
+            {phase === "error" && (
+              <button type="button" onClick={reset} className="underline">
+                Start over
+              </button>
+            )}
+          </div>
         </div>
       )}
     </main>

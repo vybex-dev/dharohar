@@ -1,6 +1,8 @@
+// app/api/jobs/[id]/advance/route.ts
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { badRequest, errorMessage } from "@/lib/http";
+import { JOB_COLUMNS, jobView } from "@/lib/jobs";
 import type { RunnableStage } from "@/lib/pipeline";
 import { STAGE_HANDLERS } from "@/lib/stages";
 import type { AssetRow, JobRow } from "@/lib/stages/types";
@@ -13,22 +15,8 @@ export const maxDuration = 60;
 
 const ParamsSchema = z.object({ id: z.string().uuid() });
 
-const JOB_COLUMNS =
-  "id, asset_id, site_id, stage, status, attempts, max_attempts, locked_at, error, created_at, updated_at";
 const ASSET_COLUMNS =
   "id, site_id, kind, storage_bucket, storage_path, original_filename, mime_type, size_bytes, title, notes, content_hash, language_detected, ocr_text, ocr_confidence, text_en";
-
-function jobView(j: JobRow) {
-  return {
-    id: j.id,
-    stage: j.stage,
-    status: j.status,
-    attempts: j.attempts,
-    max_attempts: j.max_attempts,
-    error: j.error,
-    site_id: j.site_id,
-  };
-}
 
 export async function POST(
   _req: Request,
@@ -56,12 +44,35 @@ export async function POST(
       );
     }
 
-    // Already finished: nothing to do. Safe to call forever.
+    // Already finished: nothing to do. Safe to call forever — and safe to resume
+    // after a page reload, since we re-report whether the site actually made it
+    // onto the map (embed.ts can finish a job without publishing; see below).
     if (current.stage === "published" && current.status === "done") {
+      let output: Record<string, unknown> | undefined;
+      if (current.site_id) {
+        const { data: siteData } = await db
+          .from("sites")
+          .select("status, needs_manual_location")
+          .eq("id", current.site_id)
+          .maybeSingle();
+        const site = siteData as {
+          status: string;
+          needs_manual_location: boolean;
+        } | null;
+        if (site) {
+          output = {
+            published: site.status === "published",
+            publishBlockedReason: site.needs_manual_location
+              ? "needs a manually placed location before it can be published"
+              : null,
+          };
+        }
+      }
       return NextResponse.json({
         ok: true,
         claimed: false,
         ran: null,
+        output,
         job: jobView(current),
       });
     }
@@ -83,7 +94,7 @@ export async function POST(
           ? "Another request is running this stage (its lock expires after 120 seconds)."
           : current.status === "failed" &&
               current.attempts >= current.max_attempts
-            ? "Out of attempts. Fix the cause and reset the job."
+            ? "Out of attempts. POST /api/jobs/[id]/retry to give it a fresh set of attempts."
             : "Stage not claimable right now.";
       return NextResponse.json({
         ok: true,
@@ -146,6 +157,9 @@ export async function POST(
         ok: true,
         claimed: true,
         ran: stage,
+        provider: result.provider ?? null,
+        model: result.model ?? null,
+        output: result.output,
         job: jobView(after),
       });
     } catch (stageErr) {

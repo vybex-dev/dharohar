@@ -1,3 +1,4 @@
+// lib/pipeline.ts
 export const STAGES = [
   "uploaded",
   "ocr",
@@ -34,6 +35,11 @@ export const DEFAULT_LOCATION = { lat: 23.0225, lng: 72.5714 } as const; // Ahme
 
 // Must match vector(768) in sql/001_schema.sql.
 export const EMBEDDING_DIMENSIONS = 768;
+
+// Shared between lib/stages/embed.ts (sets this) and the advance route's
+// "already finished" branch (re-reports it on a resumed/reloaded poll).
+export const PUBLISH_BLOCKED_NEEDS_LOCATION =
+  "needs a manually placed location before it can be published";
 
 /** Progress bar value: index of the NEXT stage to run, as a percentage. */
 export function progressPercent(stage: Stage, status: string): number {

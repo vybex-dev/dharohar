@@ -86,12 +86,11 @@ const categoryOrNull = z.preprocess((v) => {
 }, z.enum(SITE_CATEGORIES).nullable());
 
 export const ParseQueryOutputSchema = z.object({
-  semantic_query: z.string().min(1), // the query rewritten in English
-  category: categoryOrNull,
-  state: z.string().nullable(),
-  district: z.string().nullable(),
-  near_place: z.string().nullable(),
-  language: z.string(),
+  topic: z.string(), // search subject rewritten in English; "" if the query is only a place/filter
+  place: z.string().nullable(), // a named place to search near, or null
+  radius_km: z.number().positive().max(2000).nullable(), // explicit distance ONLY if the user stated one
+  era: z.string().nullable(), // period/era as the user said it, or null
+  type: categoryOrNull, // one of SITE_CATEGORIES, or null
 });
 export type ParseQueryOutput = z.infer<typeof ParseQueryOutputSchema>;
 
@@ -479,18 +478,18 @@ function buildExtract(input: ExtractInput): BuiltRequest {
   };
 }
 
+// NEW
 function buildParseQuery(input: ParseQueryInput): BuiltRequest {
   return {
     system: [
       "You turn a visitor's search query about Indian cultural heritage, written in any language, into structured search parameters for a database of English-language heritage records.",
-      "Never invent filters that the query does not imply.",
+      "Never invent a place, era, type or radius the query does not state or clearly imply.",
       "Reply with a single JSON object and nothing else, with these keys:",
-      '"semantic_query": the query rewritten in English, keeping meaningful descriptive words and dropping filler;',
-      `"category": one of ${SITE_CATEGORIES.join(", ")}, or null unless the query clearly names a type;`,
-      '"state": Indian state in English, or null;',
-      '"district": district in English, or null;',
-      '"near_place": a named place the user wants results near, or null;',
-      '"language": ISO 639-1 code of the original query.',
+      '"topic": the subject of the search rewritten in English — what kind of thing, what it\'s about, materials, craft, legend, etc. Drop filler words and anything already captured by the other keys below. Use "" if the query is only a place name or a filter with no separate topic;',
+      '"place": a named place the user wants results near (a city, town, region or landmark), or null;',
+      '"radius_km": a search radius in kilometers, ONLY if the user explicitly stated a distance (e.g. "within 20km", "20 km of X"); otherwise null — do not invent a default;',
+      '"era": the historical period or era as the user stated it (e.g. "11th century", "Mughal period", "pre-independence"), or null;',
+      `"type": one of ${SITE_CATEGORIES.join(", ")}, or null unless the query clearly names a type.`,
     ].join("\n"),
     user: `Query: ${input.query}`,
   };
