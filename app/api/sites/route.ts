@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { eraBucket } from "@/lib/facets";
 import { errorMessage } from "@/lib/http";
 import { getServerSupabase } from "@/lib/supabase-server";
 
@@ -13,6 +14,8 @@ type SiteRow = {
   state: string | null;
   district: string | null;
   summary_en: string | null;
+  period: string | null;
+  crafts: string[] | null;
   lat: number;
   lng: number;
 };
@@ -32,7 +35,7 @@ export async function GET() {
     const { data: siteData, error: siteErr } = await db
       .from("sites_geo")
       .select(
-        "id, slug, name_en, category, state, district, summary_en, lat, lng",
+        "id, slug, name_en, category, state, district, summary_en, period, crafts, lat, lng",
       )
       .eq("status", "published")
       .not("lat", "is", null)
@@ -102,6 +105,9 @@ export async function GET() {
             summary.length > SUMMARY_MAX_CHARS
               ? `${summary.slice(0, SUMMARY_MAX_CHARS).trimEnd()}…`
               : summary,
+          period: s.period,
+          era_bucket: eraBucket(s.period),
+          crafts: s.crafts ?? [],
           lat: s.lat,
           lng: s.lng,
           thumbnail_url: photo

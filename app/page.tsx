@@ -1,52 +1,43 @@
 "use client";
 
 import "maplibre-gl/dist/maplibre-gl.css";
-import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
-import type {
-  Map as MapLibreMap,
-  Marker,
-  StyleSpecification,
-} from "maplibre-gl";
+import { useRouter } from "next/navigation";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { Map as MapLibreMap, Marker, Popup } from "maplibre-gl";
+import SearchPanel, {
+  type FacetOption,
+  type ResultRow,
+} from "@/components/SearchPanel";
+import {
+  CATEGORIES,
+  EMPTY_FILTERS,
+  ERA_BUCKETS,
+  ERA_LABEL,
+  categoryLabel,
+  siteMatchesFilters,
+  whyMatched,
+  type Filters,
+  type SearchResponse,
+  type SiteDto,
+} from "@/lib/facets";
+import { buildStyle, workerUrl } from "@/lib/map-style";
 
-type SiteDto = {
-  id: string;
-  slug: string;
-  name_en: string;
-  category: string;
-  state: string | null;
-  district: string | null;
-  summary_en: string;
-  lat: number;
-  lng: number;
-  thumbnail_url: string | null;
-};
-
+type MapLibre = typeof import("maplibre-gl");
 type SitesResponse = { ok: boolean; sites?: SiteDto[]; error?: string };
+type SearchState = {
+  key: string;
+  data?: SearchResponse;
+  error?: string;
+} | null;
 
-// Default: OpenStreetMap's public raster tiles (light use only; see usage-policy notes).
-// Override with NEXT_PUBLIC_MAP_STYLE_URL (a style JSON URL) to switch providers.
-function buildStyle(): string | StyleSpecification {
-  const custom = process.env.NEXT_PUBLIC_MAP_STYLE_URL;
-  if (custom) return custom;
-  return {
-    version: 8,
-    sources: {
-      osm: {
-        type: "raster",
-        tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
-        tileSize: 256,
-        maxzoom: 19,
-        attribution:
-          '© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a> contributors',
-      },
-    },
-    layers: [{ id: "osm", type: "raster", source: "osm" }],
-  };
-}
+const SEARCH_DEBOUNCE_MS = 600;
+const MIN_QUERY_CHARS = 2;
 
 // Built with DOM nodes + textContent (never HTML strings) so uploaded titles can't inject markup.
-function buildPopupContent(site: SiteDto): HTMLElement {
+function buildPopupContent(
+  site: SiteDto,
+  onOpen: (id: string) => void,
+): HTMLElement {
   const root = document.createElement("div");
   root.style.cssText =
     "width:230px;color:#111;font-family:system-ui,sans-serif";
@@ -89,48 +80,149 @@ function buildPopupContent(site: SiteDto): HTMLElement {
       "font-size:13px;line-height:1.35;max-height:110px;overflow:auto";
     root.appendChild(s);
   }
+
+  const link = document.createElement("a");
+  link.href = `/sites/${site.id}`;
+  link.textContent = "Open full record →";
+  link.style.cssText =
+    "display:inline-block;margin-top:8px;font-size:13px;font-weight:600;color:#92400e";
+  link.addEventListener("click", (e) => {
+    // Plain clicks use client-side navigation; modified clicks keep the browser default.
+    if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+    e.preventDefault();
+    onOpen(site.id);
+  });
+  root.appendChild(link);
   return root;
 }
 
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+// A pin whose look is driven by data-state ("hover" | "active") in globals.css.
+// Wrapped in a div because maplibre positions the outer element with its own transform.
+function buildPin(
+  site: SiteDto,
+  handlers: {
+    select: (id: string) => void;
+    hover: (id: string | null) => void;
+  },
+): { el: HTMLElement; setRank: (rank: number | null) => void } {
+  const el = document.createElement("div");
+  el.className = "dh-marker";
+  el.setAttribute("role", "button");
+  el.tabIndex = 0;
+  el.setAttribute("aria-label", site.name_en);
+
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("viewBox", "0 0 28 36");
+  svg.setAttribute("width", "28");
+  svg.setAttribute("height", "36");
+  svg.setAttribute("aria-hidden", "true");
+  const body = document.createElementNS(SVG_NS, "path");
+  body.setAttribute("class", "dh-pin-body");
+  body.setAttribute(
+    "d",
+    "M14 0C6.3 0 0 6.1 0 13.6 0 23.8 14 36 14 36s14-12.2 14-22.4C28 6.1 21.7 0 14 0z",
+  );
+  const dot = document.createElementNS(SVG_NS, "circle");
+  dot.setAttribute("cx", "14");
+  dot.setAttribute("cy", "13.5");
+  dot.setAttribute("r", "5");
+  dot.setAttribute("fill", "#fff");
+  const label = document.createElementNS(SVG_NS, "text");
+  label.setAttribute("x", "14");
+  label.setAttribute("y", "17.2");
+  label.setAttribute("text-anchor", "middle");
+  label.setAttribute("font-size", "11");
+  label.setAttribute("font-weight", "700");
+  label.setAttribute("font-family", "system-ui,sans-serif");
+  label.setAttribute("fill", "#7c2d12");
+  svg.append(body, dot, label);
+  el.appendChild(svg);
+
+  el.addEventListener("click", (e) => {
+    e.stopPropagation();
+    handlers.select(site.id);
+  });
+  el.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      handlers.select(site.id);
+    }
+  });
+  el.addEventListener("mouseenter", () => handlers.hover(site.id));
+  el.addEventListener("mouseleave", () => handlers.hover(null));
+
+  return {
+    el,
+    setRank(rank) {
+      if (rank === null) {
+        dot.setAttribute("r", "5");
+        label.textContent = "";
+      } else {
+        dot.setAttribute("r", rank > 9 ? "8.5" : "7");
+        label.setAttribute("font-size", rank > 9 ? "9.5" : "11");
+        label.textContent = String(rank);
+      }
+    },
+  };
+}
+
+type PinHandle = { marker: Marker; setRank: (rank: number | null) => void };
+
 export default function HomePage() {
+  const router = useRouter();
   const containerRef = useRef<HTMLDivElement>(null);
+  const mapRef = useRef<MapLibreMap | null>(null);
+  const libRef = useRef<MapLibre | null>(null);
+  const pinsRef = useRef(new globalThis.Map<string, PinHandle>());
+  const popupRef = useRef<Popup | null>(null);
+  const selectFromRef = useRef<"list" | "map" | null>(null);
+  const skipNextFitRef = useRef(false);
+
   const [status, setStatus] = useState<"loading" | "ready" | "error">(
     "loading",
   );
-  const [count, setCount] = useState(0);
+  const [mapReady, setMapReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [sites, setSites] = useState<SiteDto[]>([]);
+
+  const [query, setQuery] = useState("");
+  const [submitted, setSubmitted] = useState("");
+  const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
+  const [retryN, setRetryN] = useState(0);
+  const [result, setResult] = useState<SearchState>(null);
+
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [hoverId, setHoverId] = useState<string | null>(null);
+
+  /* ---------------- map + pins ---------------- */
+
+  const selectSite = useCallback((id: string, from: "list" | "map") => {
+    selectFromRef.current = from;
+    setSelectedId(id);
+  }, []);
 
   useEffect(() => {
     let disposed = false;
-    let map: MapLibreMap | null = null;
-    const markers = new globalThis.Map<string, Marker>();
+    const pins = pinsRef.current;
 
     async function init() {
       try {
         // Named exports only: the default export is undefined under Turbopack.
-        const {
-          Map,
-          Marker,
-          Popup,
-          NavigationControl,
-          LngLatBounds,
-          setWorkerUrl,
-        } = await import("maplibre-gl");
+        const lib = await import("maplibre-gl");
         if (disposed || !containerRef.current) return;
+        libRef.current = lib;
+        lib.setWorkerUrl(workerUrl());
 
-        // maplibre-gl 6.x uses a MODULE worker. Turbopack can't bundle it, so serve the
-        // prebuilt worker (plus its shared chunk) from /public. Must run before new Map().
-        setWorkerUrl(
-          new URL("/maplibre-gl-worker.mjs", window.location.origin).href,
-        );
-
-        map = new Map({
+        const map = new lib.Map({
           container: containerRef.current,
           style: buildStyle(),
           center: [75.5, 25.0], // Gujarat / Rajasthan
           zoom: 5,
         });
-        map.addControl(new NavigationControl(), "top-right");
+        mapRef.current = map;
+        map.addControl(new lib.NavigationControl(), "top-right");
 
         const res = await fetch("/api/sites");
         const data = (await res.json()) as SitesResponse;
@@ -141,32 +233,36 @@ export default function HomePage() {
           );
         }
 
-        const bounds = new LngLatBounds();
         for (const site of data.sites) {
-          const marker = new Marker({ color: "#b45309" })
+          const pin = buildPin(site, {
+            select: (id) => selectSite(id, "map"),
+            hover: setHoverId,
+          });
+          const marker = new lib.Marker({ element: pin.el, anchor: "bottom" })
             .setLngLat([site.lng, site.lat])
-            .setPopup(
-              new Popup({ offset: 24, maxWidth: "260px" }).setDOMContent(
-                buildPopupContent(site),
-              ),
-            )
             .addTo(map);
-          markers.set(site.id, marker);
-          bounds.extend([site.lng, site.lat]);
+          pins.set(site.id, { marker, setRank: pin.setRank });
         }
-        setCount(data.sites.length);
+        setSites(data.sites);
 
-        // Deep link from the upload page: /?site=<id>
-        const wanted = new URLSearchParams(window.location.search).get("site");
+        // Deep links: /?site=<id> (from the upload page) and /?q=<text>.
+        const sp = new URLSearchParams(window.location.search);
+        const q = sp.get("q")?.slice(0, 500) ?? "";
+        if (q) {
+          setQuery(q);
+          setSubmitted(q.trim());
+        }
+        const wanted = sp.get("site");
         const target = wanted
           ? data.sites.find((s) => s.id === wanted)
           : undefined;
         if (target) {
+          skipNextFitRef.current = true;
           map.jumpTo({ center: [target.lng, target.lat], zoom: 13 });
-          markers.get(target.id)?.togglePopup();
-        } else if (data.sites.length > 0) {
-          map.fitBounds(bounds, { padding: 70, maxZoom: 9, duration: 0 });
+          selectFromRef.current = null;
+          setSelectedId(target.id);
         }
+        setMapReady(true);
         setStatus("ready");
       } catch (err) {
         if (disposed) return;
@@ -178,37 +274,335 @@ export default function HomePage() {
     void init();
     return () => {
       disposed = true;
-      markers.forEach((m) => m.remove());
-      map?.remove();
+      popupRef.current?.remove();
+      popupRef.current = null;
+      pins.forEach((p) => p.marker.remove());
+      pins.clear();
+      mapRef.current?.remove();
+      mapRef.current = null;
     };
-  }, []);
+  }, [selectSite]);
+
+  /* ---------------- search ---------------- */
+
+  const filtersKey = JSON.stringify(filters);
+  const searchKey = submitted
+    ? JSON.stringify([submitted, filtersKey, retryN])
+    : "";
+  const pending = searchKey !== "" && result?.key !== searchKey;
+
+  // Debounce typing into a submitted query. Clearing is handled in the change handler.
+  useEffect(() => {
+    const q = query.trim();
+    if (q.length < MIN_QUERY_CHARS || q === submitted) return;
+    const t = setTimeout(() => setSubmitted(q), SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(t);
+  }, [query, submitted]);
+
+  useEffect(() => {
+    if (!searchKey) return;
+    const ctrl = new AbortController();
+    const params = new URLSearchParams({ q: submitted });
+    const f = JSON.parse(filtersKey) as Filters;
+    f.types.forEach((v) => params.append("type", v));
+    f.eras.forEach((v) => params.append("era", v));
+    f.crafts.forEach((v) => params.append("craft", v));
+
+    (async () => {
+      try {
+        const res = await fetch(`/api/search?${params}`, {
+          signal: ctrl.signal,
+        });
+        const data = (await res.json()) as SearchResponse;
+        if (!res.ok || !data.ok) {
+          throw new Error(data.error ?? `Search failed (HTTP ${res.status})`);
+        }
+        setResult({ key: searchKey, data });
+      } catch (e) {
+        if (ctrl.signal.aborted) return;
+        setResult({
+          key: searchKey,
+          error: e instanceof Error ? e.message : "Search failed",
+        });
+      }
+    })();
+    return () => ctrl.abort();
+  }, [searchKey, submitted, filtersKey]);
+
+  // Keep ?q= in the address bar so a search can be shared (and survives reload).
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    if (submitted) url.searchParams.set("q", submitted);
+    else url.searchParams.delete("q");
+    if (url.href !== window.location.href) {
+      window.history.replaceState(window.history.state, "", url);
+    }
+  }, [submitted]);
+
+  /* ---------------- derived view model ---------------- */
+
+  const siteById = useMemo(
+    () => new globalThis.Map(sites.map((s) => [s.id, s])),
+    [sites],
+  );
+
+  const filteredSites = useMemo(
+    () =>
+      sites
+        .filter((s) => siteMatchesFilters(s, filters))
+        .sort((a, b) => a.name_en.localeCompare(b.name_en)),
+    [sites, filters],
+  );
+
+  const searchActive = submitted !== "";
+  // The latest *completed* search keeps the pins steady while the next one is in flight.
+  const lastData = searchActive ? result?.data : undefined;
+  const response = !pending && result?.key === searchKey ? result : null;
+  const searchError = response?.error ?? null;
+
+  const rows: ResultRow[] = useMemo(() => {
+    if (searchActive) {
+      const d = response?.data;
+      if (!d?.results) return [];
+      return d.results.map((r, i) => {
+        const site = siteById.get(r.site_id);
+        return {
+          id: r.site_id,
+          name: r.name,
+          category: r.type,
+          state: r.state,
+          district: r.district,
+          era: r.era,
+          thumbnail: site?.thumbnail_url ?? null,
+          text: r.snippet,
+          highlight: r.matched_signals.includes("keyword"),
+          chips: whyMatched(r, d.place),
+          rank: i + 1,
+        };
+      });
+    }
+    return filteredSites.map((s) => ({
+      id: s.id,
+      name: s.name_en,
+      category: s.category,
+      state: s.state,
+      district: s.district,
+      era: s.period,
+      thumbnail: s.thumbnail_url,
+      text: s.summary_en,
+      highlight: false,
+      chips: [],
+      rank: null,
+    }));
+  }, [searchActive, response, siteById, filteredSites]);
+
+  // Which pins to show, in rank order, and the rank each carries.
+  const pinOrder = useMemo(() => {
+    if (searchActive && lastData?.results) {
+      return lastData.results
+        .map((r) => r.site_id)
+        .filter((id) => siteById.has(id));
+    }
+    return filteredSites.map((s) => s.id);
+  }, [searchActive, lastData, siteById, filteredSites]);
+  const pinKey = pinOrder.join(",");
+  const showRanks = searchActive && !!lastData?.results;
+
+  const facets = useMemo(() => {
+    const present = new Set(sites.map((s) => s.category));
+    const types: FacetOption[] = CATEGORIES.filter((c) => present.has(c)).map(
+      (c) => ({ value: c, label: categoryLabel(c) }),
+    );
+    // categories outside the known list (future-proofing) still get a chip
+    for (const c of present)
+      if (!(CATEGORIES as readonly string[]).includes(c))
+        types.push({ value: c, label: categoryLabel(c) });
+
+    const eraSet = new Set(sites.map((s) => s.era_bucket).filter(Boolean));
+    const eras: FacetOption[] = ERA_BUCKETS.filter((e) => eraSet.has(e)).map(
+      (e) => ({ value: e, label: ERA_LABEL[e] }),
+    );
+
+    const counts = new globalThis.Map<string, { label: string; n: number }>();
+    for (const s of sites)
+      for (const c of s.crafts) {
+        const k = c.toLowerCase();
+        const cur = counts.get(k);
+        if (cur) cur.n += 1;
+        else counts.set(k, { label: c, n: 1 });
+      }
+    const crafts: FacetOption[] = [...counts.entries()]
+      .sort((a, b) => b[1].n - a[1].n || a[0].localeCompare(b[0]))
+      .map(([value, v]) => ({
+        value,
+        label: v.label.charAt(0).toUpperCase() + v.label.slice(1),
+      }));
+    return { types, eras, crafts };
+  }, [sites]);
+
+  const notes: string[] = [];
+  const d = response?.data;
+  if (d?.place) {
+    if (d.place.notFound)
+      notes.push(
+        `Couldn’t locate “${d.place.requested}” — searched by topic only.`,
+      );
+    else if (d.place.radius_km)
+      notes.push(
+        `Near ${d.place.requested} (within ${Math.round(d.place.radius_km)} km)`,
+      );
+  }
+  if (d?.usedFallback)
+    notes.push("Smart query parsing is unavailable; used plain text search.");
+
+  /* ---------------- pin sync (visibility, ranks, highlight) ---------------- */
+
+  useEffect(() => {
+    if (!mapReady) return;
+    const order = pinKey ? pinKey.split(",") : [];
+    const rank = new globalThis.Map(order.map((id, i) => [id, i + 1]));
+    for (const [id, pin] of pinsRef.current) {
+      const r = rank.get(id);
+      pin.marker.getElement().style.display = r === undefined ? "none" : "";
+      pin.setRank(r !== undefined && showRanks ? r : null);
+    }
+  }, [mapReady, pinKey, showRanks]);
+
+  useEffect(() => {
+    for (const [id, pin] of pinsRef.current) {
+      const el = pin.marker.getElement();
+      const state =
+        id === selectedId ? "active" : id === hoverId ? "hover" : "";
+      if (state) el.dataset.state = state;
+      else delete el.dataset.state;
+      el.style.zIndex = state === "active" ? "3" : state ? "2" : "";
+    }
+  }, [mapReady, selectedId, hoverId]);
+
+  // Frame whatever is currently pinned, leaving room for the panel.
+  useEffect(() => {
+    const map = mapRef.current;
+    const lib = libRef.current;
+    if (!mapReady || !map || !lib || !pinKey) return;
+    if (skipNextFitRef.current) {
+      skipNextFitRef.current = false;
+      return;
+    }
+    const bounds = new lib.LngLatBounds();
+    for (const id of pinKey.split(",")) {
+      const s = siteById.get(id);
+      if (s) bounds.extend([s.lng, s.lat]);
+    }
+    if (bounds.isEmpty()) return;
+    const wide = window.innerWidth >= 768;
+    map.fitBounds(bounds, {
+      padding: wide
+        ? { top: 70, right: 70, bottom: 70, left: 420 }
+        : { top: 70, right: 50, bottom: Math.round(window.innerHeight * 0.52) + 30, left: 50 },
+      maxZoom: 12,
+      duration: 600,
+    });
+  }, [mapReady, pinKey, siteById]);
+
+  // One popup, owned by the selection.
+  useEffect(() => {
+    const map = mapRef.current;
+    const lib = libRef.current;
+    if (!mapReady || !map || !lib) return;
+
+    const prev = popupRef.current;
+    popupRef.current = null; // so prev's close handler knows it was replaced
+    prev?.remove();
+
+    const site = selectedId ? siteById.get(selectedId) : undefined;
+    if (!site) return;
+
+    const popup = new lib.Popup({
+      offset: 38,
+      maxWidth: "260px",
+      closeOnClick: false,
+    })
+      .setLngLat([site.lng, site.lat])
+      .setDOMContent(buildPopupContent(site, (id) => router.push(`/sites/${id}`)))
+      .addTo(map);
+    popup.on("close", () => {
+      if (popupRef.current === popup) {
+        popupRef.current = null;
+        setSelectedId((cur) => (cur === site.id ? null : cur));
+      }
+    });
+    popupRef.current = popup;
+
+    const from = selectFromRef.current;
+    selectFromRef.current = null;
+    if (from === "list") {
+      map.flyTo({
+        center: [site.lng, site.lat],
+        zoom: Math.max(map.getZoom(), 11),
+        duration: 700,
+        essential: false,
+      });
+    } else if (from === "map") {
+      document
+        .getElementById(`site-row-${site.id}`)
+        ?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
+  }, [mapReady, selectedId, siteById, router]);
+
+  /* ---------------- handlers ---------------- */
+
+  const onQueryChange = (v: string) => {
+    setQuery(v);
+    if (v.trim() === "") setSubmitted("");
+  };
+  const clearSearch = () => {
+    setQuery("");
+    setSubmitted("");
+  };
+  const submitNow = () => {
+    const q = query.trim();
+    if (q.length >= MIN_QUERY_CHARS) {
+      setSubmitted(q);
+      setRetryN((n) => n + 1); // Enter on an unchanged query re-runs it
+    }
+  };
+  const pickExample = (q: string) => {
+    setQuery(q);
+    setSubmitted(q);
+  };
 
   return (
     <main className="fixed inset-0">
       {/* maplibre adds its own positioning class to this node, so it fills a wrapper instead of being fixed itself */}
       <div ref={containerRef} className="h-full w-full" />
 
-      <div className="absolute left-3 top-3 z-10 flex items-center gap-3 rounded-lg bg-white/95 px-3 py-2 text-black shadow">
-        <span className="text-lg font-bold">Dharohar</span>
-        <span className="text-xs text-gray-600">
-          {status === "loading"
-            ? "Loading…"
-            : status === "ready"
-              ? `${count} sites`
-              : "Error"}
-        </span>
-        <Link
-          href="/upload"
-          className="rounded bg-amber-700 px-3 py-1.5 text-sm font-medium text-white"
-        >
-          + Add
-        </Link>
-      </div>
+      <SearchPanel
+        query={query}
+        onQueryChange={onQueryChange}
+        onSubmit={submitNow}
+        onClear={clearSearch}
+        onPickExample={pickExample}
+        sitesStatus={status}
+        siteCount={sites.length}
+        facets={facets}
+        filters={filters}
+        onFiltersChange={setFilters}
+        mode={searchActive ? "search" : "browse"}
+        searching={searchActive && pending}
+        searchError={searchActive ? searchError : null}
+        onRetry={() => setRetryN((n) => n + 1)}
+        notes={notes}
+        emptyNote={d?.note ?? null}
+        rows={rows}
+        selectedId={selectedId}
+        onSelect={(id) => selectSite(id, "list")}
+        onHover={setHoverId}
+      />
 
       {status === "error" && (
         <div
           role="alert"
-          className="absolute left-3 right-3 top-16 z-10 rounded-lg bg-red-100 p-3 text-sm text-red-900 shadow"
+          className="absolute right-3 top-3 z-10 max-w-sm rounded-lg bg-red-100 p-3 text-sm text-red-900 shadow md:left-[404px] md:right-auto"
         >
           {error}
         </div>

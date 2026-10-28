@@ -24,3 +24,53 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* ---- map pins (app/page.tsx builds these as DOM nodes) ---- */
+.dh-marker {
+  width: 28px;
+  height: 36px;
+  cursor: pointer;
+}
+.dh-marker svg {
+  display: block;
+  overflow: visible;
+  filter: drop-shadow(0 1px 2px rgb(0 0 0 / 0.35));
+  transform-origin: 50% 100%;
+  transition: transform 0.12s ease-out;
+}
+.dh-marker .dh-pin-body {
+  fill: #b45309;
+}
+.dh-marker[data-state="hover"] svg {
+  transform: scale(1.15);
+}
+.dh-marker[data-state="active"] svg {
+  transform: scale(1.3);
+}
+.dh-marker[data-state="active"] .dh-pin-body {
+  fill: #7c2d12;
+}
+.dh-marker:focus-visible {
+  outline: 2px solid #1d4ed8;
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .dh-marker svg {
+    transition: none;
+  }
+}
+
+@keyframes dh-slide {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(300%);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  [class*="animate-[dh-slide"] {
+    animation: none;
+  }
+}

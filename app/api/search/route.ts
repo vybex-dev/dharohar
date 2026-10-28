@@ -1,6 +1,7 @@
 // app/api/search/route.ts
 import { NextResponse } from "next/server";
 import { z } from "zod";
+import { CATEGORIES, ERA_BUCKETS, type SearchResultDto } from "@/lib/facets";
 import { errorMessage } from "@/lib/http";
 import { geocodeQuery } from "@/lib/geocoding";
 import { callLLM } from "@/lib/llm";
@@ -10,6 +11,14 @@ import { getServerSupabase } from "@/lib/supabase-server";
 
 const QuerySchema = z.object({
   q: z.string().trim().min(1, "Query cannot be empty").max(500),
+  // UI filters: repeat the param to select several (?type=fort&type=temple).
+  // AND across facets, OR within one. They override the LLM-parsed type/era.
+  type: z.array(z.enum(CATEGORIES)).max(CATEGORIES.length).default([]),
+  era: z.array(z.enum(ERA_BUCKETS)).max(ERA_BUCKETS.length).default([]),
+  craft: z
+    .array(z.string().trim().min(1).max(60).transform((s) => s.toLowerCase()))
+    .max(10)
+    .default([]),
 });
 
 const DEFAULT_RADIUS_KM = 50; // applied when a place is named but no radius was stated
@@ -71,24 +80,16 @@ async function parseSearchQuery(
   }
 }
 
-type SiteResultRow = {
-  site_id: string;
-  slug: string;
-  name: string;
-  type: string;
-  era: string | null;
-  lat: number | null;
-  lng: number | null;
-  snippet: string;
-  distance_m: number | null;
-  score: number;
-  matched_signals: string[];
-};
+// Row shape returned by search_sites() (sql/008_search_v2.sql).
+type SiteResultRow = SearchResultDto;
 
 export async function GET(req: Request) {
   const url = new URL(req.url);
   const parsedParams = QuerySchema.safeParse({
     q: url.searchParams.get("q") ?? "",
+    type: url.searchParams.getAll("type"),
+    era: url.searchParams.getAll("era"),
+    craft: url.searchParams.getAll("craft"),
   });
   if (!parsedParams.success) {
     return NextResponse.json(
@@ -100,6 +101,9 @@ export async function GET(req: Request) {
     );
   }
   const rawQuery = parsedParams.data.q;
+  const uiTypes = parsedParams.data.type;
+  const uiEras = parsedParams.data.era;
+  const uiCrafts = parsedParams.data.craft;
 
   try {
     const db = getServerSupabase();
@@ -162,9 +166,10 @@ export async function GET(req: Request) {
       }
     }
 
+    // A facet the user picked in the UI wins over what the LLM guessed from the text.
     const filters: Record<string, string> = {};
-    if (parsed.type) filters.type = parsed.type;
-    if (parsed.era) filters.era = parsed.era;
+    if (parsed.type && uiTypes.length === 0) filters.type = parsed.type;
+    if (parsed.era && uiEras.length === 0) filters.era = parsed.era;
 
     // CASE: nothing at all to search on (empty topic, no place, no filters —
     // e.g. parsing failed AND the raw query was itself empty-ish after
@@ -190,6 +195,9 @@ export async function GET(req: Request) {
       radius_m: radiusM,
       filters,
       match_count: MATCH_COUNT,
+      filter_types: uiTypes.length > 0 ? uiTypes : null,
+      filter_crafts: uiCrafts.length > 0 ? uiCrafts : null,
+      filter_eras: uiEras.length > 0 ? uiEras : null,
     });
     if (error) throw new Error(`Search failed: ${error.message}`);
 
