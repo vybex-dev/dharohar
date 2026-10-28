@@ -1,5 +1,13 @@
+import "server-only";
+import { callLLM, embeddingModelId } from "@/lib/llm";
 import type { StageHandler } from "./types";
-import { fakeEmbedding, sha256Hex } from "./util";
+
+type ChunkRow = {
+  id: string;
+  chunk_index: number;
+  text_en: string;
+  embedding_model: string | null;
+};
 
 export const embedStage: StageHandler = async ({ db, job, asset }) => {
   const siteId = job.site_id ?? asset.site_id;
@@ -8,43 +16,77 @@ export const embedStage: StageHandler = async ({ db, job, asset }) => {
       "No site linked to this job. The extract stage must run first.",
     );
 
-  // Temporary fallback chain until the real extract stage supplies translated text_en.
-  const text =
-    asset.text_en?.trim() ||
-    asset.ocr_text?.trim() ||
-    asset.title?.trim() ||
-    `Upload ${asset.id.slice(0, 8)}`;
+  const { data, error } = await db
+    .from("doc_chunks")
+    .select("id, chunk_index, text_en, embedding_model")
+    .eq("asset_id", asset.id)
+    .order("chunk_index", { ascending: true });
+  if (error) throw new Error(`Could not read chunks: ${error.message}`);
+  const rows = (data ?? []) as ChunkRow[];
+  if (rows.length === 0)
+    throw new Error(
+      "No chunks to embed. The extract stage must write them first.",
+    );
 
-  const embedding = fakeEmbedding(asset.content_hash ?? sha256Hex(asset.id));
+  // Anything not embedded with the current model (null, stub or an older model) gets embedded now.
+  const model = embeddingModelId();
+  const pending = rows.filter((r) => r.embedding_model !== model);
 
-  // unique(asset_id, chunk_index) makes this an idempotent upsert.
-  const { error: chunkErr } = await db.from("doc_chunks").upsert(
-    {
-      site_id: siteId,
-      asset_id: asset.id,
-      chunk_index: 0,
-      text_en: text,
-      text_original: asset.ocr_text,
-      language: asset.language_detected,
-      ocr_confidence: asset.ocr_confidence,
-      content_hash: sha256Hex(text),
-      embedding: JSON.stringify(embedding), // pgvector accepts '[0.1,0.2,...]'
-      embedding_model: "stub",
-    },
-    { onConflict: "asset_id,chunk_index" },
-  );
-  if (chunkErr) throw new Error(`Could not save chunk: ${chunkErr.message}`);
+  let usedModel = model;
+  let cached = false;
+  if (pending.length > 0) {
+    const r = await callLLM("embed", {
+      texts: pending.map((p) => p.text_en),
+      purpose: "document",
+    });
+    if (r.output.vectors.length !== pending.length) {
+      throw new Error(
+        `Expected ${pending.length} vectors, got ${r.output.vectors.length}`,
+      );
+    }
+    usedModel = r.model;
+    cached = r.cached;
 
-  // Stub pipeline auto-publishes. A real review step will gate this later.
-  const { error: pubErr } = await db
-    .from("sites")
-    .update({ status: "published" })
-    .eq("id", siteId);
-  if (pubErr) throw new Error(`Could not publish site: ${pubErr.message}`);
+    for (let i = 0; i < pending.length; i += 10) {
+      const group = pending.slice(i, i + 10);
+      const results = await Promise.all(
+        group.map((row, j) =>
+          db
+            .from("doc_chunks")
+            .update({
+              embedding: JSON.stringify(r.output.vectors[i + j]), // pgvector accepts '[0.1,0.2,...]'
+              embedding_model: r.model,
+            })
+            .eq("id", row.id),
+        ),
+      );
+      const bad = results.find((x) => x.error);
+      if (bad?.error)
+        throw new Error(`Could not save an embedding: ${bad.error.message}`);
+    }
+  }
+
+  // Set AUTO_PUBLISH=false to keep uploads as drafts for a review step.
+  let published = false;
+  if (process.env.AUTO_PUBLISH?.trim() !== "false") {
+    const { error: pubErr } = await db
+      .from("sites")
+      .update({ status: "published" })
+      .eq("id", siteId);
+    if (pubErr)
+      throw new Error(`Could not publish the site: ${pubErr.message}`);
+    published = true;
+  }
 
   return {
-    output: { siteId, dims: embedding.length, stub: true },
-    provider: "stub",
-    model: "stub",
+    output: {
+      siteId,
+      chunks: rows.length,
+      embedded: pending.length,
+      cached,
+      published,
+    },
+    provider: "gemini",
+    model: usedModel,
   };
 };
